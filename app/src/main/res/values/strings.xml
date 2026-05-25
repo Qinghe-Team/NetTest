@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Qinghe</string>
+    <string name="app_name">Qinghe弱网</string>
     <string name="action_about">更多信息</string>
     <string name="title_config_add">新增配置</string>
     <string name="title_config_edit">编辑配置</string>
@@ -29,7 +29,7 @@
     <string name="no_config">暂无配置</string>
     <string name="no_app_selected">未选择应用(全局生效)</string>
     <string name="about_title">关于</string>
-    <string name="about_app_name">Qinghe</string>
+    <string name="about_app_name">Qinghe弱网</string>
     <string name="about_version">版本：v1.0</string>
     <string name="about_author">作者：Qinghe</string>
     <string name="about_free">本软件永久免费开源</string>

@@ -2,27 +2,37 @@ package com.qinghe.nettest;
 
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.net.VpnService;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.Button;
 import android.widget.TextView;
+import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import com.qinghe.nettest.db.AppDatabase;
+import com.qinghe.nettest.floating.FloatingWindowService;
 import com.qinghe.nettest.model.NetworkConfig;
+import com.qinghe.nettest.vpn.QingheVpnService;
 import java.util.ArrayList;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_APP_SELECT = 1001;
+    private static final int REQUEST_VPN_PERMISSION = 1002;
+    private static final int REQUEST_OVERLAY_PERMISSION = 1003;
     private TextView tvSelectedApp;
     private RecyclerView rvConfigs;
     private ConfigAdapter adapter;
     private List<NetworkConfig> configs = new ArrayList<>();
     private SharedPreferences prefs;
+    private NetworkConfig selectedConfig;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -35,6 +45,7 @@ public class MainActivity extends AppCompatActivity {
         rvConfigs = findViewById(R.id.rv_configs);
         Button btnSelectApp = findViewById(R.id.btn_select_app);
         Button btnAddConfig = findViewById(R.id.btn_add_config);
+        Button btnStart = findViewById(R.id.btn_start);
 
         rvConfigs.setLayoutManager(new LinearLayoutManager(this));
         adapter = new ConfigAdapter(configs, new ConfigAdapter.OnConfigActionListener() {
@@ -52,11 +63,19 @@ public class MainActivity extends AppCompatActivity {
                     .setPositiveButton(android.R.string.ok, (d, w) -> {
                         new Thread(() -> {
                             AppDatabase.getInstance(MainActivity.this).networkConfigDao().delete(config);
-                            runOnUiThread(() -> loadConfigs());
+                            runOnUiThread(() -> {
+                                selectedConfig = null;
+                                loadConfigs();
+                            });
                         }).start();
                     })
                     .setNegativeButton(android.R.string.cancel, null)
                     .show();
+            }
+
+            @Override
+            public void onSelect(NetworkConfig config) {
+                selectedConfig = config;
             }
         });
         rvConfigs.setAdapter(adapter);
@@ -70,7 +89,59 @@ public class MainActivity extends AppCompatActivity {
             startActivity(new Intent(this, ConfigEditActivity.class));
         });
 
+        btnStart.setOnClickListener(v -> {
+            if (selectedConfig == null) {
+                Toast.makeText(this, "请先选择一个配置项", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            startService();
+        });
+
         updateSelectedApp();
+    }
+
+    private void startService() {
+        // Check overlay permission
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
+            startActivityForResult(intent, REQUEST_OVERLAY_PERMISSION);
+            return;
+        }
+
+        // Check VPN permission
+        Intent vpnIntent = VpnService.prepare(this);
+        if (vpnIntent != null) {
+            startActivityForResult(vpnIntent, REQUEST_VPN_PERMISSION);
+            return;
+        }
+
+        // Save active config id
+        prefs.edit().putInt("active_config_id", selectedConfig.getId()).apply();
+
+        // Start VPN service
+        Intent startVpn = new Intent(this, QingheVpnService.class);
+        startVpn.setAction(QingheVpnService.ACTION_START);
+        startVpn.putExtra(QingheVpnService.EXTRA_CONFIG_ID, selectedConfig.getId());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(startVpn);
+        } else {
+            startService(startVpn);
+        }
+
+        // Start floating window
+        Intent floatingIntent = new Intent(this, FloatingWindowService.class);
+        startService(floatingIntent);
+
+        // Jump to target app
+        String targetPackage = prefs.getString("selected_package", null);
+        if (targetPackage != null) {
+            Intent launchIntent = getPackageManager().getLaunchIntentForPackage(targetPackage);
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(launchIntent);
+            }
+        }
     }
 
     @Override
@@ -108,6 +179,14 @@ public class MainActivity extends AppCompatActivity {
             String name = data.getStringExtra("app_name");
             prefs.edit().putString("selected_package", pkg).putString("selected_app_name", name).apply();
             updateSelectedApp();
+        } else if (requestCode == REQUEST_VPN_PERMISSION && resultCode == RESULT_OK) {
+            startService();
+        } else if (requestCode == REQUEST_OVERLAY_PERMISSION) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.canDrawOverlays(this)) {
+                startService();
+            } else {
+                Toast.makeText(this, R.string.floating_window_permission, Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
