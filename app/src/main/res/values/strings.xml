@@ -40,4 +40,7 @@
     <string name="selected_app">已选应用：%s</string>
     <string name="config_delete_confirm">确定删除此配置？</string>
     <string name="floating_window_permission">需要悬浮窗权限</string>
+    <string name="floating_toggle">切换服务</string>
+    <string name="floating_refresh">刷新配置</string>
+    <string name="floating_expand">展开或收起</string>
 </resources>

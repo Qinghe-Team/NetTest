@@ -117,7 +117,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         // Save active config id
-        prefs.edit().putInt("active_config_id", selectedConfig.getId()).apply();
+        prefs.edit()
+            .putInt("active_config_id", selectedConfig.getId())
+            .putBoolean("service_active", true)
+            .apply();
 
         // Start VPN service
         Intent startVpn = new Intent(this, QingheVpnService.class);

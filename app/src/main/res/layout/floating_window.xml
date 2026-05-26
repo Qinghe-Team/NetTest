@@ -1,56 +1,63 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="wrap_content"
+    android:layout_width="264dp"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:background="@color/floating_bg"
-    android:padding="8dp"
-    android:minWidth="200dp">
+    android:background="@drawable/floating_panel_bg"
+    android:padding="6dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:orientation="horizontal">
 
-        <ImageView
-            android:layout_width="24dp"
-            android:layout_height="24dp"
-            android:src="@mipmap/ic_launcher"
-            android:contentDescription="Qinghe" />
-
-        <Button
+        <ImageButton
             android:id="@+id/btn_floating_toggle"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:text="@string/btn_start"
-            android:textSize="12sp"
-            android:layout_marginStart="8dp"
-            android:textColor="@color/white" />
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/floating_tile_normal"
+            android:contentDescription="@string/floating_toggle"
+            android:padding="16dp"
+            android:src="@drawable/ic_power"
+            android:tint="@color/white" />
 
-        <Button
+        <ImageButton
+            android:id="@+id/btn_floating_refresh"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/floating_tile_normal"
+            android:contentDescription="@string/floating_refresh"
+            android:padding="16dp"
+            android:src="@drawable/ic_refresh"
+            android:tint="@color/white" />
+
+        <ImageButton
             android:id="@+id/btn_floating_expand"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:text="▼"
-            android:textSize="12sp"
-            android:layout_marginStart="8dp"
-            android:textColor="@color/white" />
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/floating_tile_normal"
+            android:contentDescription="@string/floating_expand"
+            android:padding="16dp"
+            android:src="@drawable/ic_expand_less"
+            android:tint="@color/white" />
     </LinearLayout>
 
     <LinearLayout
         android:id="@+id/layout_expanded"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:visibility="gone"
-        android:layout_marginTop="8dp">
+        android:orientation="vertical">
 
-        <Spinner
-            android:id="@+id/spinner_config"
+        <GridLayout
+            android:id="@+id/grid_configs"
             android:layout_width="match_parent"
-            android:layout_height="36dp"
-            android:backgroundTint="@color/white" />
+            android:layout_height="wrap_content"
+            android:columnCount="3"
+            android:rowCount="1"
+            android:useDefaultMargins="false" />
     </LinearLayout>
 
 </LinearLayout>
