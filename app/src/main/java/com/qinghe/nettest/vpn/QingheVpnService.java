@@ -9,6 +9,7 @@ import android.content.SharedPreferences;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import com.qinghe.nettest.MainActivity;
 import com.qinghe.nettest.R;
 import com.qinghe.nettest.db.AppDatabase;
@@ -30,7 +31,7 @@ public class QingheVpnService extends VpnService {
     private ParcelFileDescriptor vpnInterface;
     private AtomicBoolean isRunning = new AtomicBoolean(false);
     private Thread vpnThread;
-    private NetworkConfig currentConfig;
+    private volatile NetworkConfig currentConfig;
     private static QingheVpnService instance;
 
     public static QingheVpnService getInstance() {
@@ -125,6 +126,9 @@ public class QingheVpnService extends VpnService {
         FileOutputStream out = new FileOutputStream(vpnInterface.getFileDescriptor());
         ByteBuffer buffer = ByteBuffer.allocate(32767);
         Random random = new Random();
+        long upContinuousLossCycleStartedAt = SystemClock.elapsedRealtime();
+        int lastUpContinuousLossPassTime = 0;
+        int lastUpContinuousLossDropTime = 0;
 
         while (isRunning.get()) {
             try {
@@ -150,9 +154,27 @@ public class QingheVpnService extends VpnService {
                     (protocol == 2 && isUdp);
 
                 if (shouldApply) {
+                    int upContinuousLossPassTime = Math.max(0, currentConfig.getUpContinuousLossPassTime());
+                    int upContinuousLossDropTime = Math.max(0, currentConfig.getUpContinuousLossDropTime());
+                    if (upContinuousLossPassTime != lastUpContinuousLossPassTime
+                        || upContinuousLossDropTime != lastUpContinuousLossDropTime) {
+                        upContinuousLossCycleStartedAt = SystemClock.elapsedRealtime();
+                        lastUpContinuousLossPassTime = upContinuousLossPassTime;
+                        lastUpContinuousLossDropTime = upContinuousLossDropTime;
+                    }
+
+                    if (shouldDropForContinuousLoss(
+                        upContinuousLossPassTime,
+                        upContinuousLossDropTime,
+                        upContinuousLossCycleStartedAt,
+                        SystemClock.elapsedRealtime())) {
+                        continue;
+                    }
+
                     // Random packet loss
-                    if (currentConfig.getUpPacketLoss() > 0) {
-                        if (random.nextInt(100) < currentConfig.getUpPacketLoss()) {
+                    int upPacketLoss = clampPercentage(currentConfig.getUpPacketLoss());
+                    if (upPacketLoss > 0) {
+                        if (random.nextInt(100) < upPacketLoss) {
                             continue; // drop packet
                         }
                     }
@@ -167,12 +189,9 @@ public class QingheVpnService extends VpnService {
                     }
 
                     // Bandwidth limiting
-                    if (currentConfig.getUpBandwidth() > 0) {
-                        int bytesPerMs = (currentConfig.getUpBandwidth() * 1000 / 8) / 1000;
-                        if (bytesPerMs > 0) {
-                            int sleepTime = length / bytesPerMs;
-                            if (sleepTime > 0) Thread.sleep(sleepTime);
-                        }
+                    long bandwidthDelay = calculateBandwidthDelayMillis(length, currentConfig.getUpBandwidth());
+                    if (bandwidthDelay > 0) {
+                        Thread.sleep(bandwidthDelay);
                     }
                 }
 
@@ -187,6 +206,38 @@ public class QingheVpnService extends VpnService {
                 break;
             }
         }
+    }
+
+    private static int clampPercentage(int percentage) {
+        return Math.max(0, Math.min(percentage, 100));
+    }
+
+    private static boolean shouldDropForContinuousLoss(
+        int passTimeMs, int dropTimeMs, long cycleStartedAtMs, long nowMs) {
+        if (dropTimeMs <= 0) {
+            return false;
+        }
+        if (passTimeMs <= 0) {
+            return true;
+        }
+
+        long cycleDurationMs = (long) passTimeMs + dropTimeMs;
+        if (cycleDurationMs <= 0) {
+            return false;
+        }
+
+        long elapsedMs = Math.max(0, nowMs - cycleStartedAtMs);
+        long positionInCycle = elapsedMs % cycleDurationMs;
+        return positionInCycle >= passTimeMs;
+    }
+
+    private static long calculateBandwidthDelayMillis(int packetLengthBytes, int bandwidthKbps) {
+        if (packetLengthBytes <= 0 || bandwidthKbps <= 0) {
+            return 0;
+        }
+
+        long bits = packetLengthBytes * 8L;
+        return (bits + bandwidthKbps - 1L) / bandwidthKbps;
     }
 
     private void stopVpn() {
