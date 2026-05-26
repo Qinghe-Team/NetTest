@@ -30,7 +30,7 @@ public class QingheVpnService extends VpnService {
     private ParcelFileDescriptor vpnInterface;
     private AtomicBoolean isRunning = new AtomicBoolean(false);
     private Thread vpnThread;
-    private NetworkConfig currentConfig;
+    private volatile NetworkConfig currentConfig;
     private static QingheVpnService instance;
 
     public static QingheVpnService getInstance() {
@@ -94,10 +94,11 @@ public class QingheVpnService extends VpnService {
         String selectedPackage = prefs.getString("selected_package", null);
 
         Builder builder = new Builder()
-            .setSession("Qinghe")
+            .setSession("Qinghe弱网")
             .addAddress("10.0.0.2", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("8.8.8.8");
+            .addDnsServer("8.8.8.8")
+            .setMtu(1500);
 
         if (selectedPackage != null) {
             try {
@@ -116,67 +117,117 @@ public class QingheVpnService extends VpnService {
         isRunning.set(true);
         startForeground(NOTIFICATION_ID, createNotification());
 
-        vpnThread = new Thread(this::runVpnLoop);
+        vpnThread = new Thread(this::runVpnLoop, "VPN-Loop");
         vpnThread.start();
     }
 
+    /**
+     * Main VPN loop: reads packets from tun device and applies weak-network effects.
+     *
+     * In Android's TUN VPN architecture:
+     * - Reading from tun fd gets OUTGOING packets (app -> internet), source IP = 10.0.0.2
+     * - Reading from tun fd also gets INCOMING packets (internet -> app), dest IP = 10.0.0.2
+     *   after the kernel routes them back through the tun interface.
+     *
+     * We differentiate direction by checking the source/dest IP in the IP header,
+     * then apply upstream or downstream effects accordingly.
+     */
     private void runVpnLoop() {
         FileInputStream in = new FileInputStream(vpnInterface.getFileDescriptor());
         FileOutputStream out = new FileOutputStream(vpnInterface.getFileDescriptor());
-        ByteBuffer buffer = ByteBuffer.allocate(32767);
+        byte[] packet = new byte[32767];
         Random random = new Random();
 
         while (isRunning.get()) {
             try {
-                buffer.clear();
-                int length = in.read(buffer.array());
+                int length = in.read(packet);
                 if (length <= 0) {
-                    Thread.sleep(10);
+                    Thread.sleep(1);
                     continue;
                 }
 
-                if (currentConfig == null) {
-                    out.write(buffer.array(), 0, length);
+                NetworkConfig config = currentConfig;
+
+                // If no config, pass through without any effect
+                if (config == null) {
+                    out.write(packet, 0, length);
                     continue;
                 }
 
-                // Apply upstream effects
-                boolean isUdp = length > 9 && (buffer.get(9) & 0xFF) == 17;
-                boolean isTcp = length > 9 && (buffer.get(9) & 0xFF) == 6;
-                int protocol = currentConfig.getProtocol();
+                // Parse IPv4 header to determine protocol and direction
+                boolean isIpv4 = length >= 20 && ((packet[0] >> 4) & 0xF) == 4;
+                if (!isIpv4) {
+                    // Non-IPv4 packets pass through directly
+                    out.write(packet, 0, length);
+                    continue;
+                }
 
-                boolean shouldApply = (protocol == 3) ||
-                    (protocol == 1 && isTcp) ||
-                    (protocol == 2 && isUdp);
+                int ipProto = packet[9] & 0xFF;
+                boolean isTcp = (ipProto == 6);
+                boolean isUdp = (ipProto == 17);
+
+                // Determine direction: outgoing has source 10.0.0.2
+                boolean isOutgoing = (packet[12] == 10 && packet[13] == 0 &&
+                                      packet[14] == 0 && packet[15] == 2);
+
+                // Determine which protocol filter to apply
+                int protocolFilter = config.getProtocol();
+                boolean shouldApply = (protocolFilter == 3) ||
+                    (protocolFilter == 1 && isTcp) ||
+                    (protocolFilter == 2 && isUdp);
 
                 if (shouldApply) {
-                    // Random packet loss
-                    if (currentConfig.getUpPacketLoss() > 0) {
-                        if (random.nextInt(100) < currentConfig.getUpPacketLoss()) {
+                    if (isOutgoing) {
+                        // Apply UPSTREAM effects
+                        int upLoss = config.getUpPacketLoss();
+                        if (upLoss > 0 && random.nextInt(100) < upLoss) {
                             continue; // drop packet
                         }
-                    }
 
-                    // Delay simulation
-                    int delay = currentConfig.getUpDelay();
-                    if (currentConfig.getUpJitter() > 0) {
-                        delay += random.nextInt(currentConfig.getUpJitter());
-                    }
-                    if (delay > 0) {
-                        Thread.sleep(delay);
-                    }
+                        int delay = config.getUpDelay();
+                        if (config.getUpJitter() > 0) {
+                            delay += random.nextInt(config.getUpJitter());
+                        }
+                        if (delay > 0) {
+                            Thread.sleep(delay);
+                        }
 
-                    // Bandwidth limiting
-                    if (currentConfig.getUpBandwidth() > 0) {
-                        int bytesPerMs = (currentConfig.getUpBandwidth() * 1000 / 8) / 1000;
-                        if (bytesPerMs > 0) {
-                            int sleepTime = length / bytesPerMs;
-                            if (sleepTime > 0) Thread.sleep(sleepTime);
+                        int bw = config.getUpBandwidth();
+                        if (bw > 0) {
+                            int bytesPerSecond = bw * 1000 / 8;
+                            if (bytesPerSecond > 0) {
+                                int sleepMs = (length * 1000) / bytesPerSecond;
+                                if (sleepMs > 0) Thread.sleep(sleepMs);
+                            }
+                        }
+                    } else {
+                        // Apply DOWNSTREAM effects
+                        int downLoss = config.getDownPacketLoss();
+                        if (downLoss > 0 && random.nextInt(100) < downLoss) {
+                            continue; // drop packet
+                        }
+
+                        int delay = config.getDownDelay();
+                        if (config.getDownJitter() > 0) {
+                            delay += random.nextInt(config.getDownJitter());
+                        }
+                        if (delay > 0) {
+                            Thread.sleep(delay);
+                        }
+
+                        int bw = config.getDownBandwidth();
+                        if (bw > 0) {
+                            int bytesPerSecond = bw * 1000 / 8;
+                            if (bytesPerSecond > 0) {
+                                int sleepMs = (length * 1000) / bytesPerSecond;
+                                if (sleepMs > 0) Thread.sleep(sleepMs);
+                            }
                         }
                     }
                 }
 
-                out.write(buffer.array(), 0, length);
+                // Pass the packet through
+                out.write(packet, 0, length);
 
             } catch (InterruptedException e) {
                 break;

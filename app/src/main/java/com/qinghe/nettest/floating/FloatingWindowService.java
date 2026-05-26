@@ -10,12 +10,11 @@ import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.Spinner;
-import android.widget.AdapterView;
+import android.widget.TextView;
 import com.qinghe.nettest.R;
 import com.qinghe.nettest.db.AppDatabase;
 import com.qinghe.nettest.model.NetworkConfig;
@@ -28,7 +27,8 @@ public class FloatingWindowService extends Service {
     private View floatingView;
     private boolean isExpanded = false;
     private List<NetworkConfig> configs = new ArrayList<>();
-    private List<String> configNames = new ArrayList<>();
+    private int selectedConfigIndex = -1;
+    private List<Button> configButtons = new ArrayList<>();
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -66,8 +66,17 @@ public class FloatingWindowService extends Service {
 
         Button btnToggle = floatingView.findViewById(R.id.btn_floating_toggle);
         Button btnExpand = floatingView.findViewById(R.id.btn_floating_expand);
+        Button btnClose = floatingView.findViewById(R.id.btn_floating_close);
         LinearLayout layoutExpanded = floatingView.findViewById(R.id.layout_expanded);
-        Spinner spinnerConfig = floatingView.findViewById(R.id.spinner_config);
+
+        // Fix issue 3: Show correct toggle state when service starts
+        // Since this service is started from MainActivity after VPN is already started,
+        // the VPN should be running, so show "停止"
+        if (QingheVpnService.isServiceRunning()) {
+            btnToggle.setText(R.string.btn_stop);
+        } else {
+            btnToggle.setText(R.string.btn_start);
+        }
 
         // Toggle VPN service
         btnToggle.setOnClickListener(v -> {
@@ -96,28 +105,22 @@ public class FloatingWindowService extends Service {
             isExpanded = !isExpanded;
             layoutExpanded.setVisibility(isExpanded ? View.VISIBLE : View.GONE);
             btnExpand.setText(isExpanded ? "▲" : "▼");
-        });
-
-        // Load configs for spinner
-        loadConfigs(spinnerConfig);
-
-        // Config selection listener
-        spinnerConfig.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position < configs.size() && QingheVpnService.isServiceRunning()) {
-                    QingheVpnService.getInstance().updateConfig(configs.get(position).getId());
-                }
+            if (isExpanded) {
+                loadConfigs();
             }
-
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        // Touch listener for dragging
-        floatingView.setOnTouchListener(new View.OnTouchListener() {
+        // Close floating window
+        btnClose.setOnClickListener(v -> {
+            stopSelf();
+        });
+
+        // Touch listener for dragging - only on the top bar
+        LinearLayout topBar = (LinearLayout) floatingView.findViewById(R.id.btn_floating_toggle).getParent();
+        topBar.setOnTouchListener(new View.OnTouchListener() {
             private int initialX, initialY;
             private float initialTouchX, initialTouchY;
+            private boolean isDragging = false;
 
             @Override
             public boolean onTouch(View v, MotionEvent event) {
@@ -127,38 +130,150 @@ public class FloatingWindowService extends Service {
                         initialY = params.y;
                         initialTouchX = event.getRawX();
                         initialTouchY = event.getRawY();
+                        isDragging = false;
                         return true;
                     case MotionEvent.ACTION_MOVE:
-                        params.x = initialX + (int) (event.getRawX() - initialTouchX);
-                        params.y = initialY + (int) (event.getRawY() - initialTouchY);
-                        windowManager.updateViewLayout(floatingView, params);
+                        float dx = event.getRawX() - initialTouchX;
+                        float dy = event.getRawY() - initialTouchY;
+                        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                            isDragging = true;
+                        }
+                        if (isDragging) {
+                            params.x = initialX + (int) dx;
+                            params.y = initialY + (int) dy;
+                            windowManager.updateViewLayout(floatingView, params);
+                        }
                         return true;
+                    case MotionEvent.ACTION_UP:
+                        return isDragging;
                 }
                 return false;
             }
         });
     }
 
-    private void loadConfigs(Spinner spinner) {
+    private void loadConfigs() {
         new Thread(() -> {
             List<NetworkConfig> list = AppDatabase.getInstance(this).networkConfigDao().getAll();
             configs.clear();
             configs.addAll(list);
-            configNames.clear();
-            for (NetworkConfig c : configs) {
-                configNames.add(c.getName());
-            }
             if (floatingView != null) {
-                floatingView.post(() -> {
-                    ArrayAdapter<String> adapter = new ArrayAdapter<>(
-                        FloatingWindowService.this,
-                        android.R.layout.simple_spinner_item,
-                        configNames);
-                    adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-                    spinner.setAdapter(adapter);
-                });
+                floatingView.post(() -> buildConfigGrid());
             }
         }).start();
+    }
+
+    private void buildConfigGrid() {
+        LinearLayout configGrid = floatingView.findViewById(R.id.config_grid);
+        configGrid.removeAllViews();
+        configButtons.clear();
+
+        if (configs.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText(R.string.no_config);
+            empty.setTextColor(0xFFFFFFFF);
+            empty.setPadding(8, 8, 8, 8);
+            empty.setTextSize(12);
+            configGrid.addView(empty);
+            return;
+        }
+
+        // Determine which config is currently active
+        int activeConfigId = getSharedPreferences("qinghe_prefs", MODE_PRIVATE)
+            .getInt("active_config_id", -1);
+        selectedConfigIndex = -1;
+        for (int i = 0; i < configs.size(); i++) {
+            if (configs.get(i).getId() == activeConfigId) {
+                selectedConfigIndex = i;
+                break;
+            }
+        }
+
+        // Build grid - flat tiled buttons, aligned with top bar
+        LinearLayout currentRow = null;
+        int buttonsInRow = 0;
+        int columnsPerRow = 3;
+
+        for (int i = 0; i < configs.size(); i++) {
+            if (buttonsInRow % columnsPerRow == 0) {
+                currentRow = new LinearLayout(this);
+                currentRow.setOrientation(LinearLayout.HORIZONTAL);
+                currentRow.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+                configGrid.addView(currentRow);
+                buttonsInRow = 0;
+            }
+
+            Button btn = new Button(this);
+            btn.setText(configs.get(i).getName());
+            btn.setTextSize(10);
+            btn.setTextColor(0xFFFFFFFF);
+            btn.setPadding(4, 4, 4, 4);
+            btn.setMinWidth(0);
+            btn.setMinHeight(0);
+            btn.setMinimumWidth(0);
+            btn.setMinimumHeight(0);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                btn.setStateListAnimator(null);
+            }
+
+            LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
+                0, 44);
+            btnParams.weight = 1;
+            btn.setLayoutParams(btnParams);
+
+            // Set background based on selection
+            if (i == selectedConfigIndex) {
+                btn.setBackgroundResource(R.drawable.btn_square_blue);
+            } else {
+                btn.setBackgroundResource(R.drawable.btn_square_grey);
+            }
+
+            final int index = i;
+            btn.setOnClickListener(v -> {
+                selectConfig(index);
+            });
+
+            configButtons.add(btn);
+            currentRow.addView(btn);
+            buttonsInRow++;
+        }
+
+        // Fill remaining slots in last row with empty views for alignment
+        if (buttonsInRow > 0 && buttonsInRow < columnsPerRow && currentRow != null) {
+            for (int i = buttonsInRow; i < columnsPerRow; i++) {
+                View spacer = new View(this);
+                LinearLayout.LayoutParams spacerParams = new LinearLayout.LayoutParams(
+                    0, 44);
+                spacerParams.weight = 1;
+                spacer.setLayoutParams(spacerParams);
+                spacer.setBackgroundResource(R.drawable.btn_square_grey);
+                spacer.setAlpha(0.3f);
+                currentRow.addView(spacer);
+            }
+        }
+    }
+
+    private void selectConfig(int index) {
+        // Update visual selection
+        if (selectedConfigIndex >= 0 && selectedConfigIndex < configButtons.size()) {
+            configButtons.get(selectedConfigIndex).setBackgroundResource(R.drawable.btn_square_grey);
+        }
+        selectedConfigIndex = index;
+        if (selectedConfigIndex >= 0 && selectedConfigIndex < configButtons.size()) {
+            configButtons.get(selectedConfigIndex).setBackgroundResource(R.drawable.btn_square_blue);
+        }
+
+        // Apply config immediately (real-time)
+        if (index < configs.size()) {
+            NetworkConfig config = configs.get(index);
+            getSharedPreferences("qinghe_prefs", MODE_PRIVATE).edit()
+                .putInt("active_config_id", config.getId()).apply();
+            if (QingheVpnService.isServiceRunning() && QingheVpnService.getInstance() != null) {
+                QingheVpnService.getInstance().updateConfig(config.getId());
+            }
+        }
     }
 
     @Override
