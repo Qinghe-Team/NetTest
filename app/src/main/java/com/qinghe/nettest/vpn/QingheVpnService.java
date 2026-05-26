@@ -16,7 +16,6 @@ import com.qinghe.nettest.model.NetworkConfig;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 
