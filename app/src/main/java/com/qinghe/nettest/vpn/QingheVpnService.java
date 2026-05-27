@@ -284,9 +284,8 @@ public class QingheVpnService extends VpnService {
 
                     if (srcIP == LOCAL_IP && srcPort == udpProxyPort) {
                         // Response from UDP proxy -> rewrite headers
-                        // The dstPort tells us which local port originated the request
-                        int dstPortVal = getShort(packet, ipHeaderLen + 2) & 0xFFFF;
-                        UdpNatSession session = findUdpSessionByLocalPort(dstPortVal);
+                        // dstPort is the local port that originated the request
+                        UdpNatSession session = findUdpSessionByLocalPort(dstPort);
                         if (session != null) {
                             putInt(packet, 12, session.remoteIP);
                             putShort(packet, ipHeaderLen, (short) session.remotePort);
