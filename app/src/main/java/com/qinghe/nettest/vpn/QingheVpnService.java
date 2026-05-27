@@ -21,7 +21,6 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.SelectionKey;
@@ -50,6 +49,7 @@ public class QingheVpnService extends VpnService {
     private static final String TAG = "QingheVPN";
     private static final String CHANNEL_ID = "qinghe_vpn_channel";
     private static final int NOTIFICATION_ID = 1;
+    private static final int MAX_PACKET_SIZE = 20000;
     public static final String ACTION_START = "com.qinghe.nettest.VPN_START";
     public static final String ACTION_STOP = "com.qinghe.nettest.VPN_STOP";
     public static final String EXTRA_CONFIG_ID = "config_id";
@@ -223,7 +223,7 @@ public class QingheVpnService extends VpnService {
      */
     private void runVpnLoop() {
         FileInputStream in = new FileInputStream(vpnInterface.getFileDescriptor());
-        byte[] packet = new byte[20000];
+        byte[] packet = new byte[MAX_PACKET_SIZE];
 
         while (isRunning.get()) {
             try {
@@ -268,8 +268,9 @@ public class QingheVpnService extends VpnService {
                             session = new TcpNatSession(localPort, dstIP, (short) dstPort);
                             tcpSessions.put(localPort, session);
                         }
-                        // Rewrite: dst -> local proxy
-                        putInt(packet, 12, dstIP); // src = dst (trick for routing)
+                        // Rewrite destination to local proxy.
+                        // Set src IP to original dest IP so the kernel routes response back correctly.
+                        putInt(packet, 12, dstIP);
                         putInt(packet, 16, LOCAL_IP);
                         putShort(packet, ipHeaderLen + 2, tcpProxyPort);
                         recomputeTcpChecksum(packet, ipHeaderLen, length);
@@ -283,7 +284,9 @@ public class QingheVpnService extends VpnService {
 
                     if (srcIP == LOCAL_IP && srcPort == udpProxyPort) {
                         // Response from UDP proxy -> rewrite headers
-                        UdpNatSession session = udpSessions.get(dstIP);
+                        // The dstPort tells us which local port originated the request
+                        int dstPortVal = getShort(packet, ipHeaderLen + 2) & 0xFFFF;
+                        UdpNatSession session = findUdpSessionByLocalPort(dstPortVal);
                         if (session != null) {
                             putInt(packet, 12, session.remoteIP);
                             putShort(packet, ipHeaderLen, (short) session.remotePort);
@@ -295,27 +298,26 @@ public class QingheVpnService extends VpnService {
                         }
                     } else if (srcIP == LOCAL_IP && dstPort == 53) {
                         // DNS query - forward directly via UDP proxy without effects
-                        // Create session and redirect to UDP proxy
-                        int key = srcIP * srcPort * dstIP * dstPort;
+                        int key = udpSessionKey(srcPort, dstIP, dstPort);
                         UdpNatSession session = udpSessions.get(key);
                         if (session == null) {
                             session = new UdpNatSession(srcIP, srcPort, dstIP, dstPort);
                             udpSessions.put(key, session);
                         }
-                        putInt(packet, 12, key); // encode key as src for session lookup
+                        // Redirect to local UDP proxy, keep srcPort for session tracking
                         putInt(packet, 16, LOCAL_IP);
                         putShort(packet, ipHeaderLen + 2, (short) udpProxyPort);
                         recomputeUdpChecksum(packet, ipHeaderLen, length);
                         writeToTun(packet, 0, length);
                     } else if (srcIP == LOCAL_IP) {
                         // Outgoing UDP -> redirect to UDP proxy
-                        int key = srcIP * srcPort * dstIP * dstPort;
+                        int key = udpSessionKey(srcPort, dstIP, dstPort);
                         UdpNatSession session = udpSessions.get(key);
                         if (session == null) {
                             session = new UdpNatSession(srcIP, srcPort, dstIP, dstPort);
                             udpSessions.put(key, session);
                         }
-                        putInt(packet, 12, key); // encode key as src for session lookup
+                        // Redirect to local UDP proxy, keep srcPort for session tracking
                         putInt(packet, 16, LOCAL_IP);
                         putShort(packet, ipHeaderLen + 2, (short) udpProxyPort);
                         recomputeUdpChecksum(packet, ipHeaderLen, length);
@@ -401,9 +403,10 @@ public class QingheVpnService extends VpnService {
             int passTime = config.getUpContinuousLossPassTime();
             int lossRate = config.getUpPacketLoss();
 
-            // Continuous loss pattern
+            // Continuous loss pattern: creates a periodic drop/pass cycle based on absolute time.
+            // Intentionally uses modulo of currentTimeMillis for a repeating pattern (matches APK).
             int totalTime = lossTime + passTime;
-            if (totalTime > 0 && System.currentTimeMillis() % totalTime > passTime) {
+            if (totalTime > 0 && passTime > 0 && System.currentTimeMillis() % totalTime > passTime) {
                 return true;
             }
 
@@ -416,9 +419,9 @@ public class QingheVpnService extends VpnService {
             int passTime = config.getDownContinuousLossPassTime();
             int lossRate = config.getDownPacketLoss();
 
-            // Continuous loss pattern
+            // Continuous loss pattern: creates a periodic drop/pass cycle based on absolute time.
             int totalTime = lossTime + passTime;
-            if (totalTime > 0 && System.currentTimeMillis() % totalTime > passTime) {
+            if (totalTime > 0 && passTime > 0 && System.currentTimeMillis() % totalTime > passTime) {
                 return true;
             }
 
@@ -471,7 +474,8 @@ public class QingheVpnService extends VpnService {
                 }
 
                 // Bandwidth budget calculation (bytes per 100ms interval)
-                int bytesPerInterval = (bandwidthKbps > 0) ? (bandwidthKbps * 128 * 100) / 1000 : 0;
+                long bytesPerIntervalLong = (bandwidthKbps > 0) ? ((long) bandwidthKbps * 128L * 100L) / 1000L : 0L;
+                int bytesPerInterval = (int) Math.min(bytesPerIntervalLong, Integer.MAX_VALUE);
 
                 long now = System.currentTimeMillis();
                 while (now - lastTime > 100) {
@@ -624,12 +628,13 @@ public class QingheVpnService extends VpnService {
                         DatagramChannel ch = (DatagramChannel) key.channel();
                         if (ch == udpProxyChannel) {
                             // Packet from TUN redirected to our proxy
-                            ByteBuffer buf = ByteBuffer.allocate(20000);
+                            ByteBuffer buf = ByteBuffer.allocate(MAX_PACKET_SIZE);
                             InetSocketAddress sender = (InetSocketAddress) ch.receive(buf);
                             if (sender != null) {
                                 buf.flip();
-                                int senderIP = ipToInt(sender.getAddress().getAddress());
-                                UdpNatSession session = udpSessions.get(senderIP);
+                                // Look up session by sender port (the local port that sent the packet)
+                                int senderPort = sender.getPort();
+                                UdpNatSession session = findUdpSessionByLocalPort(senderPort);
                                 if (session != null) {
                                     forwardUdpPacket(buf, session);
                                 }
@@ -665,17 +670,16 @@ public class QingheVpnService extends VpnService {
 
                 // Wait for response
                 socket.setSoTimeout(5000);
-                byte[] respBuf = new byte[20000];
+                byte[] respBuf = new byte[MAX_PACKET_SIZE];
                 DatagramPacket recvPkt = new DatagramPacket(respBuf, respBuf.length);
                 try {
                     socket.receive(recvPkt);
 
-                    // Send response back through UDP proxy channel
+                    // Send response back to the original local port through the UDP proxy channel
                     ByteBuffer resp = ByteBuffer.wrap(respBuf, 0, recvPkt.getLength());
-                    int keyIP = session.localIP * session.localPort * session.remoteIP * session.remotePort;
-                    InetSocketAddress keyAddr = new InetSocketAddress(
-                        InetAddress.getByAddress(intToBytes(keyIP)), session.remotePort);
-                    udpProxyChannel.send(resp, keyAddr);
+                    InetSocketAddress localAddr = new InetSocketAddress(
+                        InetAddress.getByName("10.0.0.2"), session.localPort);
+                    udpProxyChannel.send(resp, localAddr);
                 } catch (Exception ignored) {
                     // Timeout or error receiving response
                 }
@@ -685,6 +689,29 @@ public class QingheVpnService extends VpnService {
                 if (socket != null) socket.close();
             }
         }, "UDP-Fwd").start();
+    }
+
+    /**
+     * Generate a stable key for UDP session lookup using XOR-based hash to avoid overflow.
+     */
+    private static int udpSessionKey(int localPort, int remoteIP, int remotePort) {
+        int hash = 17;
+        hash = hash * 31 + localPort;
+        hash = hash * 31 + remoteIP;
+        hash = hash * 31 + remotePort;
+        return hash;
+    }
+
+    /**
+     * Find a UDP session by the local port that originated the request.
+     */
+    private UdpNatSession findUdpSessionByLocalPort(int localPort) {
+        for (UdpNatSession session : udpSessions.values()) {
+            if (session.localPort == localPort) {
+                return session;
+            }
+        }
+        return null;
     }
 
     private synchronized void writeToTun(byte[] data, int offset, int length) {
@@ -795,23 +822,9 @@ public class QingheVpnService extends VpnService {
         return ((a & 0xFF) << 24) | ((b & 0xFF) << 16) | ((c & 0xFF) << 8) | (d & 0xFF);
     }
 
-    private static int ipToInt(byte[] addr) {
-        return ((addr[0] & 0xFF) << 24) | ((addr[1] & 0xFF) << 16) |
-               ((addr[2] & 0xFF) << 8) | (addr[3] & 0xFF);
-    }
-
     private static String intToIp(int ip) {
         return ((ip >> 24) & 0xFF) + "." + ((ip >> 16) & 0xFF) + "." +
                ((ip >> 8) & 0xFF) + "." + (ip & 0xFF);
-    }
-
-    private static byte[] intToBytes(int value) {
-        return new byte[]{
-            (byte) ((value >> 24) & 0xFF),
-            (byte) ((value >> 16) & 0xFF),
-            (byte) ((value >> 8) & 0xFF),
-            (byte) (value & 0xFF)
-        };
     }
 
     private static int getInt(byte[] data, int offset) {
